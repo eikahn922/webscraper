@@ -1,6 +1,6 @@
 # Webscraper for Dogwood
 
-Python scraper for filling missing product/service fields in vendor lists.
+Python tool for enriching vendor spreadsheets with missing product/service info from web sources.
 
 It can read:
 

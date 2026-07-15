@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Read a vendor/product list from PDF, Excel, or CSV and fill missing products by
-scraping likely company websites.
+Python tool for enriching vendor spreadsheets with missing product/service info
+from web sources.
 
 The scraper is intentionally conservative:
 - it preserves every original row and column
@@ -32,6 +32,11 @@ from urllib.request import Request, urlopen
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+)
+
+PROJECT_DESCRIPTION = (
+    "Python tool for enriching vendor spreadsheets with missing product/service "
+    "info from web sources."
 )
 
 FREE_EMAIL_DOMAINS = {
@@ -786,9 +791,7 @@ def enrich_rows(args: argparse.Namespace) -> Tuple[List[Dict[str, str]], List[st
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Fill missing product/service fields by reading a PDF/XLSX/CSV vendor list and scraping web sources."
-    )
+    parser = argparse.ArgumentParser(description=PROJECT_DESCRIPTION)
     parser.add_argument("input", help="Input PDF, XLSX, or CSV file.")
     parser.add_argument("-o", "--output", default="output/enriched_products.csv", help="Output CSV path.")
     parser.add_argument("--xlsx-output", default="", help="Optional Excel output path.")
