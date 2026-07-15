@@ -1,0 +1,15 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+
+# Local/private source data
+*.pdf
+*.xlsx
+*.xls
+*.csv
+!examples/*.csv
+
+# Generated output/cache
+output/
+.scrape_cache.json
