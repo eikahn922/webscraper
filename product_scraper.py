@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""
-Python tool for enriching vendor spreadsheets with missing product/service info
-from web sources.
+"""Fill missing vendor product cells from public web pages.
 
-The scraper is intentionally conservative:
-- it preserves every original row and column
-- it only fills blank product cells unless --overwrite is passed
-- it writes source/status columns so scraped values can be checked later
-- it does not require paid APIs
+The input table is never edited in place. Each guess is written with its source,
+confidence, status, and notes so a person can review it before using it.
 """
 
 from __future__ import annotations
@@ -16,7 +11,6 @@ import argparse
 import csv
 import html
 import json
-import os
 import re
 import sys
 import time
@@ -34,10 +28,9 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 )
 
-PROJECT_DESCRIPTION = (
-    "Python tool for enriching vendor spreadsheets with missing product/service "
-    "info from web sources."
-)
+MAX_PAGE_BYTES = 700_000
+
+PROJECT_DESCRIPTION = "Fill missing vendor product or service cells from public web pages."
 
 FREE_EMAIL_DOMAINS = {
     "aol.com",
@@ -125,10 +118,29 @@ class ScrapeResult:
     notes: str = ""
 
 
+@dataclass(frozen=True)
+class Columns:
+    company: str
+    product: str
+    source: str
+    confidence: str
+    status: str
+    notes: str
+
+    def preferred_order(self) -> List[str]:
+        return [
+            self.company,
+            self.product,
+            self.source,
+            self.confidence,
+            self.status,
+            self.notes,
+        ]
+
+
 class PageTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.title_parts: List[str] = []
         self.meta_descriptions: List[str] = []
         self.headings: List[str] = []
         self.links: List[Tuple[str, str]] = []
@@ -174,9 +186,7 @@ class PageTextParser(HTMLParser):
             return
 
         current = self._tag_stack[-1] if self._tag_stack else ""
-        if current == "title":
-            self.title_parts.append(text)
-        elif current in {"h1", "h2", "h3"}:
+        if current in {"h1", "h2", "h3"}:
             self.headings.append(text)
 
         if current not in {"script", "style", "noscript"}:
@@ -207,13 +217,6 @@ def unique_headers(headers: Sequence[str], width: int) -> List[str]:
             seen[name] = 1
         cleaned.append(name)
     return cleaned
-
-
-def trim_empty_tail(values: Sequence[object]) -> List[str]:
-    row = [clean_text(v) for v in values]
-    while row and not row[-1]:
-        row.pop()
-    return row
 
 
 def rows_from_pdf(path: Path) -> List[Dict[str, str]]:
@@ -398,7 +401,7 @@ def fetch_url(url: str, timeout: float = 12.0) -> Tuple[str, str]:
     with urlopen(request, timeout=timeout) as response:
         content_type = response.headers.get("content-type", "")
         charset = response.headers.get_content_charset() or "utf-8"
-        body = response.read(700_000)
+        body = response.read(MAX_PAGE_BYTES)
     if "text/html" not in content_type and "application/xhtml" not in content_type and content_type:
         return "", content_type
     return body.decode(charset, errors="replace"), content_type
@@ -703,88 +706,104 @@ def save_cache(path: Optional[Path], cache: Dict[str, ScrapeResult]) -> None:
         json.dump({k: vars(v) for k, v in cache.items()}, handle, indent=2, sort_keys=True)
 
 
+def resolve_columns(rows: Sequence[Dict[str, str]], args: argparse.Namespace) -> Columns:
+    headers = ordered_headers(rows, [])
+    company = args.company_column or detect_column(
+        headers,
+        COMPANY_HEADER_HINTS,
+        blocked=("phone", "email"),
+    )
+    if not company:
+        raise RuntimeError("Could not detect a company/vendor column. Pass --company-column.")
+
+    product = args.product_column or detect_column(headers, PRODUCT_HEADER_HINTS) or "Products"
+    return Columns(
+        company=company,
+        product=product,
+        source=args.source_column,
+        confidence=args.confidence_column,
+        status=args.status_column,
+        notes=args.notes_column,
+    )
+
+
+def enrich_row(
+    source_row: Dict[str, str],
+    columns: Columns,
+    args: argparse.Namespace,
+    cache: Dict[str, ScrapeResult],
+    limit_reached: bool,
+) -> Tuple[Dict[str, str], bool, bool]:
+    row = dict(source_row)
+    for column in (
+        columns.product,
+        columns.source,
+        columns.confidence,
+        columns.status,
+        columns.notes,
+    ):
+        row.setdefault(column, "")
+
+    company = clean_text(row.get(columns.company, ""))
+    has_product = bool(clean_text(row.get(columns.product, "")))
+    if has_product and not args.overwrite:
+        row[columns.status] = row[columns.status] or "already_had_product"
+        return row, False, False
+
+    if should_skip_company(company):
+        row[columns.status] = row[columns.status] or "skipped"
+        row[columns.notes] = row[columns.notes] or "No vendor/company name to scrape."
+        return row, False, False
+
+    if limit_reached:
+        row[columns.status] = row[columns.status] or "not_processed_limit"
+        return row, False, False
+
+    result = scrape_products_for_row(
+        company=company,
+        row=row,
+        search_results=args.search_results,
+        sleep_seconds=args.sleep,
+        cache=cache,
+        no_web=args.no_web,
+    )
+    row[columns.status] = result.status
+    row[columns.confidence] = result.confidence
+    row[columns.source] = result.source_url
+    row[columns.notes] = result.notes
+    if result.products:
+        row[columns.product] = result.products
+
+    return row, True, bool(result.products)
+
+
 def enrich_rows(args: argparse.Namespace) -> Tuple[List[Dict[str, str]], List[str]]:
     input_path = Path(args.input).expanduser().resolve()
     rows = read_rows(input_path, sheet_name=args.sheet)
     if not rows:
         raise RuntimeError(f"No rows found in {input_path}")
 
-    all_headers = ordered_headers(rows, [])
-    company_col = args.company_column or detect_column(all_headers, COMPANY_HEADER_HINTS, blocked=("phone", "email"))
-    if not company_col:
-        raise RuntimeError("Could not detect a company/vendor column. Pass --company-column.")
-
-    product_col = args.product_column or detect_column(all_headers, PRODUCT_HEADER_HINTS)
-    if not product_col:
-        product_col = "Products"
-
-    source_col = args.source_column
-    confidence_col = args.confidence_column
-    status_col = args.status_column
-    notes_col = args.notes_column
-
+    columns = resolve_columns(rows, args)
     cache = load_cache(Path(args.cache).expanduser().resolve() if args.cache else None)
 
     enriched: List[Dict[str, str]] = []
     processed = 0
     filled = 0
-    for row in rows:
-        row = dict(row)
-        row.setdefault(product_col, "")
-        row.setdefault(source_col, "")
-        row.setdefault(confidence_col, "")
-        row.setdefault(status_col, "")
-        row.setdefault(notes_col, "")
-
-        company = clean_text(row.get(company_col, ""))
-        has_product = bool(clean_text(row.get(product_col, "")))
-        should_fill = args.overwrite or not has_product
-
-        if not should_fill:
-            row[status_col] = row[status_col] or "already_had_product"
-            enriched.append(row)
-            continue
-
-        if should_skip_company(company):
-            row[status_col] = row[status_col] or "skipped"
-            row[notes_col] = row[notes_col] or "No vendor/company name to scrape."
-            enriched.append(row)
-            continue
-
-        if args.limit and processed >= args.limit:
-            row[status_col] = row[status_col] or "not_processed_limit"
-            enriched.append(row)
-            continue
-
-        processed += 1
-        result = scrape_products_for_row(
-            company=company,
-            row=row,
-            search_results=args.search_results,
-            sleep_seconds=args.sleep,
+    for source_row in rows:
+        row, did_process, did_fill = enrich_row(
+            source_row=source_row,
+            columns=columns,
+            args=args,
             cache=cache,
-            no_web=args.no_web,
+            limit_reached=bool(args.limit and processed >= args.limit),
         )
-        row[status_col] = result.status
-        row[confidence_col] = result.confidence
-        row[source_col] = result.source_url
-        row[notes_col] = result.notes
-        if result.products:
-            row[product_col] = result.products
-            filled += 1
+        processed += int(did_process)
+        filled += int(did_fill)
         enriched.append(row)
 
     save_cache(Path(args.cache).expanduser().resolve() if args.cache else None, cache)
 
-    preferred_headers = [
-        company_col,
-        product_col,
-        source_col,
-        confidence_col,
-        status_col,
-        notes_col,
-    ]
-    headers = ordered_headers(enriched, preferred_headers)
+    headers = ordered_headers(enriched, columns.preferred_order())
     print(f"Read {len(rows)} rows from {input_path}")
     print(f"Processed {processed} rows; filled {filled} product cells")
     return enriched, headers

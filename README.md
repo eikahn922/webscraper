@@ -1,32 +1,30 @@
-# Webscraper for Dogwood
+# Dogwood vendor product lookup
 
-Python tool for enriching vendor spreadsheets with missing product/service info from web sources.
+Fill blank product or service cells in the Dogwood vendor list from vendors’ public web pages. The source file stays untouched; the script writes a new review file with the source and confidence for every guess.
 
-It can read:
+## Review columns
 
-- PDF tables exported from Excel
-- Excel workbooks (`.xlsx`, `.xlsm`)
-- CSV files
+| Column | What it records |
+| --- | --- |
+| `Products` | Extracted or inferred product/service description |
+| `Product Source URL` | Public page used for the description |
+| `Product Confidence` | `medium`, `low`, or `none` |
+| `Scrape Status` | Whether the value came from the web, the company name, or was skipped |
+| `Scrape Notes` | Fetch errors or the reason a row was not filled |
 
-It writes an enriched CSV, and optionally an Excel workbook, with these audit columns:
+Existing product values are left alone unless `--overwrite` is supplied. Treat every new value as a draft: the scraper uses text heuristics, not a vendor catalog API.
 
-- `Products`
-- `Product Source URL`
-- `Product Confidence`
-- `Scrape Status`
-- `Scrape Notes`
-
-## Install
+## Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-## Run on the Dogwood vendor PDF
+## Run the Dogwood list
 
-Keep the PDF outside the git repo because it contains private contact details.
+Keep the source PDF outside this repository because it contains private contact details.
 
 ```bash
 python product_scraper.py \
@@ -35,21 +33,23 @@ python product_scraper.py \
   --xlsx-output output/dogwood_enriched.xlsx
 ```
 
-## Useful options
+Inputs may be PDF tables, `.xlsx`/`.xlsm` workbooks, or CSV files. CSV output is always written; `--xlsx-output` adds a formatted workbook.
 
-Fill only a few rows while testing:
+## Common passes
+
+Check five missing rows before running the whole file:
 
 ```bash
 python product_scraper.py path/to/vendors.pdf --limit 5
 ```
 
-Run without web requests and infer from company names only:
+Avoid all network requests and infer only from company/contact names:
 
 ```bash
 python product_scraper.py path/to/vendors.pdf --no-web
 ```
 
-Use explicit column names when the script cannot detect them:
+Name the columns when automatic header detection picks the wrong fields:
 
 ```bash
 python product_scraper.py path/to/vendors.xlsx \
@@ -57,12 +57,18 @@ python product_scraper.py path/to/vendors.xlsx \
   --product-column "Product"
 ```
 
-Overwrite existing product values:
+Replace existing product values instead of filling blanks only:
 
 ```bash
 python product_scraper.py path/to/vendors.xlsx --overwrite
 ```
 
-## Notes
+HTTP results are cached in `.scrape_cache.json`. Pass `--cache ''` for a run that should neither read nor write the cache.
 
-This scraper uses public web pages and simple heuristics, so every result should be treated as a draft until reviewed. The `Product Source URL`, `Product Confidence`, and `Scrape Notes` columns are there to make that review fast.
+## Tests
+
+The test suite uses local HTML and CSV fixtures; it does not make web requests.
+
+```bash
+python -m unittest discover -s tests -v
+```
